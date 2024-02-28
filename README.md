@@ -1,6 +1,6 @@
 # Van CO2+Fan+Thermostat
 
-Code to maintain the air in my campervan. Opens the MaxxAir fan (via IR) when the CO2 level gets too high. Also a thermostat with adjustable hysteresis. Sorry there's no wiring diagram. Just put the right resistor(s) for your IR LED in place, wire up the buttons to the gpio and the rest is I2C.
+Code to maintain the air in my campervan. Opens the MaxxAir fan (via IR) when the CO2 level gets too high. Also a thermostat with adjustable hysteresis. Sorry there's no wiring diagram. Just put the right resistor(s) for your IR LED in place, wire up the buttons to the gpio and the rest is I2C and a relay to connect/disconnect the furance line.
 
 # Parts List
 

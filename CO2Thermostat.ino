@@ -1,5 +1,11 @@
 // TODO: Needs to have a trigger on the up (too much), and then needs to have a value it goes below to close.
 
+// 11 - IR LED positive
+// 8 - Relay
+// 3 - Blue button
+// 2 - Red button
+
+
 #include <IRremote.h>
 #include <Wire.h>
 #include "SparkFun_SCD4x_Arduino_Library.h" // Include the SCD40 library

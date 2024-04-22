@@ -30,10 +30,10 @@ VanState vanState = IDLE;
 #define TEMP_HYSTERESIS 2
 
 // What CO2 reading do we start venting at
-#define START_VENTING 1000
+#define START_VENTING 1200
 
-// What CO2 reading do we start venting at
-#define STOP_VENTING 600
+// What CO2 reading do we stop venting at
+#define STOP_VENTING 700
 
 // TIMINGS ----------------------------
 // how many ticks do we average over before running the main loop (to avg CO2)
@@ -46,7 +46,7 @@ VanState vanState = IDLE;
 #define RUN_HEATING_HOLD_TIME 60*1000
 
 // How long to wait after the heater stops (before venting)
-#define STOP_HEATING_HOLD_TIME 60*1000
+#define STOP_HEATING_HOLD_TIME 120*1000 // 2 mins
 
 // How long to wait for the vent to close
 #define VENTING_HOLD_TIME 30*1000
@@ -117,7 +117,7 @@ void setup() {
   digitalWrite(8, LOW);
 
   matrix.begin(0x70);
-  matrix.setBrightness(7); // out of 15
+  matrix.setBrightness(1); // out of 15
 
   // Begin communication with the sensor
   if (!tempsensor.begin()) {

@@ -16,6 +16,8 @@
 
 #include <Adafruit_MCP9808.h>
 
+#define LOG 0
+
 enum VanState {
   IDLE, // Not heating or venting
   HEATING,
@@ -24,10 +26,17 @@ enum VanState {
 
 VanState vanState = IDLE;
 
+volatile int displayState = 0;
+volatile int editing = 0; // when 1, we're editing in the current display state
 
 
-// How many degrees (F) above the setpoint do we stop heating
-#define TEMP_HYSTERESIS 2
+
+// How many degrees (F) below the setpoint do we stop heating
+#define LOW_TEMP_HYSTERESIS 2
+
+// How many degrees (F) above the setpoint do we open the fan
+#define HIGH_TEMP_HYSTERESIS 2
+
 
 // What CO2 reading do we start venting at
 #define START_VENTING 1200
@@ -65,7 +74,7 @@ VanState vanState = IDLE;
 #define VENTING_HOLD_TICKS (((long)VENTING_HOLD_TIME * MAIN_RUN_TICKS) / SLEEP_TIME)
 
 // the current temperature
-float vanTemp;
+int vanTemp = -1000;
 
 // Create the MCP9808 temperature sensor object
 Adafruit_MCP9808 tempsensor = Adafruit_MCP9808();
@@ -77,7 +86,6 @@ SCD4x co2Sensor;
 IRsend irsend(11); // TODO: was 3
 int isOpen = 0; // 0 = closed, 1 = open
 unsigned int ticks = 0;
-uint32_t averageCo2 = 0;
 
 // When we don't want to do anything for a while, we set this to some number of ticks
 // and it will decrement. When it reaches zero, we start running again.
@@ -95,7 +103,8 @@ unsigned int irSignalClose[] = { 1676, 820, 840, 1648, 852, 840, 808, 1648, 840,
 
 const int upButtonPin = 2;     // the number of the pushbutton pin
 const int downButtonPin = 3;     // the number of the pushbutton pin
-volatile int setPoint = 60; // target temperature
+volatile int lowSetPoint = 50; // target low temperature
+volatile int highSetPoint = 95; // target high temperature
 unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long debounceDelay = 200;    // the debounce time; increase if the output flickers
 
@@ -136,7 +145,13 @@ void upButtonPressed() {
     // if the current time is greater than the last debounce time plus the debounce delay
     // Serial.println("Button pressed");
     // skipTicks = 0;
-    setPoint += 1;
+    if (displayState == 2) {
+      setSetPoint(highSetPoint + 1, true);
+    } else {
+      setSetPoint(lowSetPoint + 1, false);
+      displayState = 1;
+    }
+    editing = 1; // enter editing mode if we're not there already
     lastDebounceTime = millis(); // reset the debounce timer
 
   }
@@ -147,7 +162,13 @@ void downButtonPressed() {
     // if the current time is greater than the last debounce time plus the debounce delay
     // Serial.println("Button pressed");
     // skipTicks = 0;
-    setPoint -= 1;
+    if (displayState == 2) {
+      setSetPoint(highSetPoint - 1, true);
+    } else {
+      displayState = 1;
+      setSetPoint(lowSetPoint - 1, false);
+    }
+    editing = 1; // enter editing mode if we're not there already
     lastDebounceTime = millis(); // reset the debounce timer
   }
 }
@@ -158,6 +179,20 @@ void showTempAndSet(int left, int right) {
   matrix.writeDigitNum(3, right / 10);    // Tens place of the right number
   matrix.writeDigitNum(4, right % 10);    // Units place of the right number
   matrix.writeDisplay();                  // Update the display with the new values
+}
+
+void setSetPoint(int newValue, bool isHighPoint) {
+  if (isHighPoint) {
+    if (newValue <= lowSetPoint + 5) {
+      lowSetPoint = newValue - 5;
+    }
+    highSetPoint = newValue;
+  } else {
+    if (newValue >= highSetPoint - 5) {
+      highSetPoint = newValue + 5;
+    }
+    lowSetPoint = newValue;
+  }
 }
 
 void loop() {
@@ -180,67 +215,175 @@ void loop() {
   // Serial.println(F("successful"));
   /* ENd Self Test ------------------------------------------------*/
 
+  switch(displayState) {
+    case 0:
+      showSegmentDisplay(' ', vanTemp); // Display current temperature
+      break;
+    case 1:
+      showSegmentDisplay('L', lowSetPoint); // Display "L" and low set point
+      break;
+    case 2:
+      showSegmentDisplay('H', highSetPoint); // Display "H" and high set point
+      break;
+    case 3:
+      uint16_t co2Val = co2Sensor.getCO2();
+      showSegmentDisplay('C', (int)co2Val); // Display "C" and current CO2 reading
+      break;
+  }
 
-  showTempAndSet(setPoint, (int)vanTemp);
+  // showTempAndSet(lowSetPoint, (int)vanTemp);
 
   ticks += 1;
   if (ticks > MAIN_RUN_TICKS) {
     // Read temperature from the sensor
-    vanTemp = tempsensor.readTempC();
+    float rawTemp = tempsensor.readTempC();
+    if (rawTemp != 0.0) {
+      vanTemp = (int)celsiusToFahrenheit(rawTemp);
+    }
 
-    vanTemp = celsiusToFahrenheit(vanTemp);
-    
+    // Always read the CO2 Value
+    if (LOG) {
+      Serial.print("CO2(ppm): ");
+    }
+    bool co2read = co2Sensor.readMeasurement();
+    uint16_t co2Val = co2Sensor.getCO2();
+    if (LOG) {
+      Serial.println(co2Val);
+    }
+
+
     // Print the temperature to the Serial Monitor
-    Serial.print(vanStateToStr(vanState));
-    Serial.print(" Set: ");
-    Serial.print(setPoint);
-    Serial.print(" Temp: ");
-    Serial.println(vanTemp);
+    if (LOG) {
+      Serial.print(vanStateToStr(vanState));
+      Serial.print(" Set: ");
+      Serial.print(lowSetPoint);
+      Serial.print(" Temp: ");
+      Serial.println(vanTemp);
+    }
+
+    if (editing == 0) {
+      displayState = (displayState + 1) % 4;
+    } else {
+      editing += 1;
+      if (editing > 2) {
+        // 10 seconds since last edit
+        editing = 0;
+      }
+    }
+
 
     if (skipTicks == 0) {
-      if (vanState == HEATING && ((int)vanTemp) > (setPoint+TEMP_HYSTERESIS)) {
-        // stop heating if we're above setPoint+TEMP_HYSTERESIS
-        changeVanState(IDLE);
-      }
-
-      if (vanState == IDLE && ((int)vanTemp) < setPoint) {
-        // heat if we need
-        Serial.println("Get Heat");
-        changeVanState(HEATING);
-      } 
-
-      // If we're not heating or we are venting, read the CO2
-      if ((vanState == IDLE || vanState == VENTING) && co2Sensor.readMeasurement()) {
-        Serial.print("CO2(ppm): ");
-        uint16_t co2Val = co2Sensor.getCO2();
-        Serial.println(co2Val);
-
-        // Serial.print(" Temperature(C): ");
-        // Serial.print(co2Sensor.getTemperature(), 1);
-
-        // Serial.print(" Humidity(%): ");
-        // Serial.println(co2Sensor.getHumidity(), 1);
-
-        // See if we're over the threshold to start venting
-        if (vanState == IDLE && co2Val > START_VENTING) {
-          changeVanState(VENTING);
-        } else if (vanState == VENTING && co2Val < STOP_VENTING) {
-          // See if we're under the stop point for venting
+      if (vanTemp != -1000) {
+        if (vanState == HEATING && vanTemp > (lowSetPoint+LOW_TEMP_HYSTERESIS)) {
+          // stop heating if we're above lowSetPoint+LOW_TEMP_HYSTERESIS
           changeVanState(IDLE);
         }
-        ticks = 0;
+
+        if (vanState == IDLE && vanTemp < lowSetPoint) {
+          // heat if we need
+          Serial.println("Get Heat");
+          changeVanState(HEATING);
+        }
+
+        if (vanState == IDLE && vanTemp > (highSetPoint+HIGH_TEMP_HYSTERESIS)) {
+          // open the vent if we're above highSetPoint+HIGH_TEMP_HYSTERESIS
+          changeVanState(VENTING);
+        }
+
+        // If we're not heating or we are venting, read the CO2
+        if ((vanState == IDLE || vanState == VENTING) && co2read) {
+
+          // Serial.print(" Temperature(C): ");
+          // Serial.print(co2Sensor.getTemperature(), 1);
+
+          // Serial.print(" Humidity(%): ");
+          // Serial.println(co2Sensor.getHumidity(), 1);
+
+          // See if we're over the threshold to start venting (co2 or temp)
+          if (vanState == IDLE && (co2Val > START_VENTING || vanTemp > (highSetPoint+HIGH_TEMP_HYSTERESIS))) {
+            changeVanState(VENTING);
+          } else if (vanState == VENTING && (co2Val < STOP_VENTING && ((int)vanTemp) < highSetPoint)){
+            // See if we're under the stop point for venting, both co2 and temp
+            changeVanState(IDLE);
+          }
+        }
       }
+      
     } else {
       // skipTicks > 0
-      skipTicks -= 1;
+      skipTicks -= MAIN_RUN_TICKS; // only being run every MAIN_RUN_TICKS
       // Serial.print(".");
-      Serial.print("S: ");
-      Serial.println(skipTicks);
+      if (LOG) {
+        Serial.print("S: ");
+        Serial.println(skipTicks);
+      }
     }
+
+    ticks = 0;
   }
 
   delay(SLEEP_TIME);
 }
+
+void showSegmentDisplay(char letter, int value) {
+    matrix.clear();
+    
+    // Display the letter
+    if (value >= 1000) {
+      // No space for C, show the full value
+      matrix.writeDigitNum(0, value / 1000);
+      value %= 1000; // remove the thousands place from the value
+    } else {
+      matrix.writeDigitRaw(0, encode(letter));
+    }
+
+    // If the letter is 'C', display the hundreds place of the value in the second digit
+    if (value >= 100) {
+        matrix.writeDigitNum(1, value / 100);
+        value %= 100; // remove the hundreds place from the value
+    } else {
+        matrix.writeDigitRaw(1, 0x00);
+    }
+
+    // Display the tens place of the value
+    matrix.writeDigitNum(3, value / 10);
+    value %= 10; // remove the tens place from the value
+
+    // Display the units place of the value
+    matrix.writeDigitNum(4, value);
+
+    // Send the data to the display
+    matrix.writeDisplay();
+}
+
+// void showSegmentDisplay(char letter, int value) {
+//     matrix.clear();
+    
+//     matrix.writeDigitNum(1, value / 10);    // Tens place of the right number
+//     matrix.writeDigitNum(2, value % 10);    // Units place of the right number
+    
+//     matrix.writeDigitNum(3, value / 10);    // Tens place of the right number
+//     matrix.writeDigitNum(4, value % 10);    // Units place of the right number
+//     matrix.writeDisplay();                  // Update the display with the new values
+
+// }
+
+uint8_t encode(char letter) {
+  switch(letter) {
+    case ' ':
+      return 0x00; // All segments off
+    case 'L':
+      return 0x38; // Segments for 'L'
+    case 'H':
+      return 0x76; // Segments for 'H'
+    case 'C':
+      return 0x39; // Segments for 'C'
+    default:
+      return 0x00; // All segments off for unknown characters
+  }
+}
+
+
 
 const char* vanStateToStr(VanState s) {
     switch (s) {

@@ -29,20 +29,15 @@ VanState vanState = IDLE;
 volatile int displayState = 0;
 volatile int editing = 0; // when 1, we're editing in the current display state
 
-
-
-// How many degrees (F) below the setpoint do we stop heating
-#define LOW_TEMP_HYSTERESIS 2
-
-// How many degrees (F) above the setpoint do we open the fan
-#define HIGH_TEMP_HYSTERESIS 2
-
-
 // What CO2 reading do we start venting at
-#define START_VENTING 1200
+volatile uint16_t co2StartVenting = 1200;
 
-// What CO2 reading do we stop venting at
-#define STOP_VENTING 700
+
+// How many degrees (F) above the setpoint do we stop heating
+#define LOW_TEMP_HYSTERESIS 5
+
+// How many degrees (F) below the setpoint do we open the fan
+#define HIGH_TEMP_HYSTERESIS 5
 
 // TIMINGS ----------------------------
 // how many ticks do we average over before running the main loop (to avg CO2)
@@ -52,7 +47,7 @@ volatile int editing = 0; // when 1, we're editing in the current display state
 #define SLEEP_TIME 500
 
 // The minimum run time for the heater
-#define RUN_HEATING_HOLD_TIME 60*1000
+#define RUN_HEATING_HOLD_TIME 60*1000 // 1 min
 
 // How long to wait after the heater stops (before venting)
 #define STOP_HEATING_HOLD_TIME 120*1000 // 2 mins
@@ -60,18 +55,23 @@ volatile int editing = 0; // when 1, we're editing in the current display state
 // How long to wait for the vent to close
 #define VENTING_HOLD_TIME 30*1000
 
+#define TICK_SUBTRACT 1000 / SLEEP_TIME
+
+// The interval in ms between main_run ticks
+#define TICK_EVERY (MAIN_RUN_TICKS * SLEEP_TIME) // 3 seconds
+
 
 // TICKS ------------------------
 
 
 // How many ticks to hold a state for before looking at changing it
-#define RUN_HEATING_HOLD_TICKS ((long)(RUN_HEATING_HOLD_TIME * MAIN_RUN_TICKS) / SLEEP_TIME)
+#define RUN_HEATING_HOLD_TICKS (((long)RUN_HEATING_HOLD_TIME) / TICK_EVERY)
 
 // How many ticks to hold a state for before looking at changing it
-#define STOP_HEATING_HOLD_TICKS ((long)(STOP_HEATING_HOLD_TIME * MAIN_RUN_TICKS) / SLEEP_TIME)
+#define STOP_HEATING_HOLD_TICKS (((long)STOP_HEATING_HOLD_TIME) / TICK_EVERY)
 
 // How many ticks to hold a state for before looking at changing it
-#define VENTING_HOLD_TICKS (((long)VENTING_HOLD_TIME * MAIN_RUN_TICKS) / SLEEP_TIME)
+#define VENTING_HOLD_TICKS (((long)VENTING_HOLD_TIME) / TICK_EVERY)
 
 // the current temperature
 int vanTemp = -1000;
@@ -107,6 +107,8 @@ volatile int lowSetPoint = 50; // target low temperature
 volatile int highSetPoint = 95; // target high temperature
 unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
 unsigned long debounceDelay = 200;    // the debounce time; increase if the output flickers
+
+uint16_t co2Val = 0;
 
 
 void setup() {
@@ -147,6 +149,8 @@ void upButtonPressed() {
     // skipTicks = 0;
     if (displayState == 2) {
       setSetPoint(highSetPoint + 1, true);
+    } else if (displayState == 3) {
+      co2StartVenting += 100;
     } else {
       setSetPoint(lowSetPoint + 1, false);
       displayState = 1;
@@ -164,6 +168,8 @@ void downButtonPressed() {
     // skipTicks = 0;
     if (displayState == 2) {
       setSetPoint(highSetPoint - 1, true);
+    } else if (displayState == 3) {
+      co2StartVenting -= 100;
     } else {
       displayState = 1;
       setSetPoint(lowSetPoint - 1, false);
@@ -183,6 +189,7 @@ void showTempAndSet(int left, int right) {
 
 void setSetPoint(int newValue, bool isHighPoint) {
   if (isHighPoint) {
+    // The + 5 keeps the highSetPoint at least 5 degrees above the lowSetPoint
     if (newValue <= lowSetPoint + 5) {
       lowSetPoint = newValue - 5;
     }
@@ -226,8 +233,11 @@ void loop() {
       showSegmentDisplay('H', highSetPoint); // Display "H" and high set point
       break;
     case 3:
-      uint16_t co2Val = co2Sensor.getCO2();
-      showSegmentDisplay('C', (int)co2Val); // Display "C" and current CO2 reading
+      if (editing) {
+        showSegmentDisplay('C', (int)co2StartVenting);
+      } else {
+        showSegmentDisplay('C', (int)co2Val); // Display "C" and current CO2 reading
+      }
       break;
   }
 
@@ -246,7 +256,7 @@ void loop() {
       Serial.print("CO2(ppm): ");
     }
     bool co2read = co2Sensor.readMeasurement();
-    uint16_t co2Val = co2Sensor.getCO2();
+    co2Val = co2Sensor.getCO2();
     if (LOG) {
       Serial.println(co2Val);
     }
@@ -274,7 +284,7 @@ void loop() {
 
     if (skipTicks == 0) {
       if (vanTemp != -1000) {
-        if (vanState == HEATING && vanTemp > (lowSetPoint+LOW_TEMP_HYSTERESIS)) {
+        if (vanState == HEATING && vanTemp >= (lowSetPoint+LOW_TEMP_HYSTERESIS)) {
           // stop heating if we're above lowSetPoint+LOW_TEMP_HYSTERESIS
           changeVanState(IDLE);
         }
@@ -283,11 +293,6 @@ void loop() {
           // heat if we need
           Serial.println("Get Heat");
           changeVanState(HEATING);
-        }
-
-        if (vanState == IDLE && vanTemp > (highSetPoint+HIGH_TEMP_HYSTERESIS)) {
-          // open the vent if we're above highSetPoint+HIGH_TEMP_HYSTERESIS
-          changeVanState(VENTING);
         }
 
         // If we're not heating or we are venting, read the CO2
@@ -300,9 +305,9 @@ void loop() {
           // Serial.println(co2Sensor.getHumidity(), 1);
 
           // See if we're over the threshold to start venting (co2 or temp)
-          if (vanState == IDLE && (co2Val > START_VENTING || vanTemp > (highSetPoint+HIGH_TEMP_HYSTERESIS))) {
+          if (vanState == IDLE && (co2Val > co2StartVenting || vanTemp >= (highSetPoint+HIGH_TEMP_HYSTERESIS))) {
             changeVanState(VENTING);
-          } else if (vanState == VENTING && (co2Val < STOP_VENTING && ((int)vanTemp) < highSetPoint)){
+          } else if (vanState == VENTING && (co2Val < (co2StartVenting - 500) && ((int)vanTemp) < highSetPoint)){
             // See if we're under the stop point for venting, both co2 and temp
             changeVanState(IDLE);
           }
@@ -311,7 +316,14 @@ void loop() {
       
     } else {
       // skipTicks > 0
-      skipTicks -= MAIN_RUN_TICKS; // only being run every MAIN_RUN_TICKS
+      
+      // Don't subtract more ticks than remain
+      // uint16_t subtractTicks = TICK_SUBTRACT;
+      // if (ticks < skipTicks) {
+      //   subtractTicks = ticks;
+      // }
+
+      skipTicks -= 1;//MAIN_RUN_TICKS; // only being run every MAIN_RUN_TICKS
       // Serial.print(".");
       if (LOG) {
         Serial.print("S: ");
@@ -400,6 +412,8 @@ void changeVanState(VanState newState) {
   Serial.print(" => ");
   Serial.println(vanStateToStr(newState));
 
+  bool ventCloseSent = false;
+
   // Longer holds after heating to let things dissipate.
   if (newState == HEATING) {
     // Hold any changes for a minimum amount of time
@@ -415,8 +429,8 @@ void changeVanState(VanState newState) {
     skipTicks = STOP_HEATING_HOLD_TICKS;
   }
 
-  // After venting, we can go to heating pretty quikcly
-  if (vanState == VENTING || newState == VENTING) {
+  // After venting, we can go to heating pretty quickly
+  if (vanState == VENTING) {
     Serial.print("hold for ");
     Serial.println(VENTING_HOLD_TICKS);
     skipTicks = VENTING_HOLD_TICKS;
@@ -427,11 +441,12 @@ void changeVanState(VanState newState) {
     vanState = newState;
     Serial.println("Close Fan");
     irsend.sendRaw(irSignalClose, sizeof(irSignalClose) / sizeof(irSignalClose[0]), 38);  // 38 kHz is a common frequency
+    ventCloseSent = true;
     isOpen = 0;
   }
 
   if (vanState == IDLE && newState == VENTING) {
-    // Open the vent
+    // Starting Venting, Open the vent
     vanState = newState;
     Serial.println("Open Fan");
     irsend.sendRaw(irSignalOpen, sizeof(irSignalOpen) / sizeof(irSignalOpen[0]), 38);  // 38 kHz is a common frequency
@@ -440,6 +455,14 @@ void changeVanState(VanState newState) {
   if (vanState == IDLE && newState == HEATING) {
     // Start heating the van
     vanState = newState;
+
+    if (ventCloseSent == false) {
+      // Close the vent, incase it was manually opened
+      Serial.println("Close Fan");
+      irsend.sendRaw(irSignalClose, sizeof(irSignalClose) / sizeof(irSignalClose[0]), 38);  // 38 kHz is a common frequency
+      isOpen = 0;
+    }
+
     Serial.println("Start Heating");
     digitalWrite(8, HIGH);
   }
